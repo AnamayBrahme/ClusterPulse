@@ -1,0 +1,24 @@
+apiVersion: apps/v1        # Which API version?
+kind: Deployment           # What object am I creating?
+
+metadata:
+  name: clusterpulse       # What is this object called?
+  labels:
+    app: clusterpulse      # Label on the Deployment object
+
+spec:
+  replicas: 3              # How many Pod replicas do I want?
+  selector:
+    matchLabels:
+      app: clusterpulse    # Which Pods belong to this Deployment?
+  template:
+    metadata:
+      labels:
+        app: clusterpulse  # Labels that new Pods will get
+    spec:
+      containers:
+      - name: clusterpulse
+        image: clusterpulse:dev
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 5000
