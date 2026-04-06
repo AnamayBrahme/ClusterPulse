@@ -1,0 +1,680 @@
+# Day 4 Notes - Probes, Testing, and Troubleshooting
+
+This document summarizes everything covered on Day 4 of the ClusterPulse project.
+It explains what probes are, why Day 4 matters, how readiness, liveness, and startup probes work, how to implement them, how to test them, how to intentionally break one safely, and how to troubleshoot probe-related issues.
+
+---
+
+## Day 4 Goal
+
+Day 4 is about teaching Kubernetes how to understand the health of the application.
+
+By the end of Day 3, ClusterPulse already had:
+
+- A Flask app running in a Deployment
+- 3 Pods created by that Deployment
+- A Service in front of those Pods
+- Labels and selectors working
+- Internal DNS/service discovery tested
+
+That means the app could run and could be discovered.
+
+Day 4 adds the next layer:
+
+- When should Kubernetes send traffic to a Pod?
+- When should Kubernetes stop sending traffic to a Pod?
+- When should Kubernetes restart a broken Pod?
+- When should Kubernetes wait for the app to finish starting up?
+
+That is what probes solve.
+
+---
+
+## Why Day 4 matters
+
+Without probes, Kubernetes only knows whether the container process exists.
+It does not really know whether the application is ready to serve traffic or whether it is unhealthy internally.
+
+Probes allow Kubernetes to make better decisions.
+
+### Readiness probe
+
+Readiness answers:
+
+> Is this Pod ready to receive traffic right now?
+
+If readiness fails:
+
+- The Pod may still be running
+- But Kubernetes removes it from Service traffic
+- The Pod may show `0/1 Ready`
+- The container is usually **not** restarted just because readiness fails
+
+### Liveness probe
+
+Liveness answers:
+
+> Is this container still healthy enough to keep running?
+
+If liveness fails repeatedly:
+
+- Kubernetes restarts the container
+- Restart count increases
+- The Pod may stay in `Running`, but the container inside restarts
+
+### Startup probe
+
+Startup answers:
+
+> Has the application finished starting up yet?
+
+If startup probe is configured:
+
+- Kubernetes waits for startup to succeed before enforcing liveness/readiness
+- This protects slow-starting apps from being restarted too early
+
+---
+
+## Day 4 in one sentence
+
+Day 3 made the app discoverable.
+Day 4 makes the app **health-aware**.
+
+---
+
+## Probe mapping for ClusterPulse
+
+For the ClusterPulse Flask app, the clean mapping is:
+
+- `/ready` -> readiness probe
+- `/healthz` -> liveness probe
+- `/healthz` (or a similar health endpoint) -> startup probe
+
+Why this mapping?
+
+- `/ready` should mean “safe to receive traffic”
+- `/healthz` should mean “app is alive and should not be restarted”
+- `startupProbe` should give the app time to come up before the other probes take over
+
+---
+
+## Baseline checks before adding probes
+
+Before changing the Deployment, the first step is always to confirm the Day 3 state is healthy.
+
+### Commands
+
+```bash
+kubectl get deployments
+kubectl get svc
+kubectl get pods -o wide
+kubectl get endpoints clusterpulse-service
+kubectl logs -l app=clusterpulse
+```
+
+### What to look for
+
+- Deployment desired replicas and available replicas should match
+- Service should exist
+- Endpoints should be populated
+- Pods should be `Running`
+- App logs should look normal
+
+### Why this matters
+
+If something is already broken before probes are added, it becomes harder to know whether a new failure is caused by probes or by an older issue.
+
+---
+
+## Day 4 implementation order
+
+This was the safest implementation order:
+
+1. Confirm Day 3 is healthy
+2. Add readiness probe
+3. Apply and observe normal behavior
+4. Add liveness probe
+5. Apply and observe normal behavior
+6. Add startup probe
+7. Confirm rollout success
+8. Break one probe intentionally once
+9. Observe `0/1 Ready`, restarts, events, and logs
+10. Restore the correct probe configuration
+
+---
+
+## Final Deployment YAML with probes
+
+Use this version in `manifests/deployment.yaml`:
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: clusterpulse
+  labels:
+    app: clusterpulse
+    env: dev
+    component: web
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: clusterpulse
+  template:
+    metadata:
+      labels:
+        app: clusterpulse
+        env: dev
+        component: web
+    spec:
+      containers:
+      - name: clusterpulse
+        image: clusterpulse:dev
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 5000
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: 5000
+          initialDelaySeconds: 3
+          periodSeconds: 5
+          timeoutSeconds: 2
+          failureThreshold: 2
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 5000
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          timeoutSeconds: 2
+          failureThreshold: 3
+        startupProbe:
+          httpGet:
+            path: /healthz
+            port: 5000
+          initialDelaySeconds: 0
+          periodSeconds: 5
+          timeoutSeconds: 2
+          failureThreshold: 12
+```
+
+---
+
+## Why these probe settings were chosen
+
+### Readiness probe settings
+
+```yaml
+readinessProbe:
+  httpGet:
+    path: /ready
+    port: 5000
+  initialDelaySeconds: 3
+  periodSeconds: 5
+  timeoutSeconds: 2
+  failureThreshold: 2
+```
+
+### Meaning
+
+- `path: /ready` checks whether the app is ready for traffic
+- `initialDelaySeconds: 3` gives the app a short time before first check
+- `periodSeconds: 5` checks every 5 seconds
+- `timeoutSeconds: 2` fails if the endpoint does not respond fast enough
+- `failureThreshold: 2` means repeated failures are needed before it is marked unready
+
+### Liveness probe settings
+
+```yaml
+livenessProbe:
+  httpGet:
+    path: /healthz
+    port: 5000
+  initialDelaySeconds: 10
+  periodSeconds: 10
+  timeoutSeconds: 2
+  failureThreshold: 3
+```
+
+### Meaning
+
+- `path: /healthz` checks whether the app is still alive
+- `initialDelaySeconds: 10` is longer so Kubernetes does not restart the app too early
+- `periodSeconds: 10` checks every 10 seconds
+- `failureThreshold: 3` gives some tolerance before restarting
+
+### Startup probe settings
+
+```yaml
+startupProbe:
+  httpGet:
+    path: /healthz
+    port: 5000
+  initialDelaySeconds: 0
+  periodSeconds: 5
+  timeoutSeconds: 2
+  failureThreshold: 12
+```
+
+### Meaning
+
+- The app gets extra startup time
+- Until startup succeeds, liveness and readiness are effectively held back
+- `failureThreshold * periodSeconds` gives the allowed startup window
+
+In this case:
+
+- `12 * 5 = 60 seconds`
+
+So the app gets up to about 60 seconds to start successfully.
+
+---
+
+## Commands used on Day 4
+
+### Apply updated Deployment
+
+```bash
+kubectl apply -f manifests/deployment.yaml
+```
+
+### Check rollout progress
+
+```bash
+kubectl rollout status deployment/clusterpulse
+```
+
+### Watch Pods live
+
+```bash
+kubectl get pods
+kubectl get pods -w
+```
+
+### Inspect ReplicaSets
+
+```bash
+kubectl get rs
+```
+
+### Inspect one Pod in detail
+
+```bash
+kubectl describe pod <pod-name>
+```
+
+### Check app logs
+
+```bash
+kubectl logs <pod-name>
+kubectl logs -l app=clusterpulse
+kubectl logs <pod-name> --previous
+```
+
+### Check Service endpoints
+
+```bash
+kubectl get endpoints clusterpulse-service
+```
+
+### Check recent events
+
+```bash
+kubectl get events --sort-by=.lastTimestamp | tail -20
+```
+
+---
+
+## Understanding rollout output on Day 4
+
+A typical output looked like this:
+
+```text
+NAME                            READY   STATUS        RESTARTS   AGE
+clusterpulse-66c7758c8f-5d6zc   1/1     Running       0          26s
+clusterpulse-66c7758c8f-6m2kx   1/1     Running       0          21s
+clusterpulse-66c7758c8f-lzmw8   1/1     Running       0          15s
+clusterpulse-b6cd8599f-nd97w    1/1     Terminating   1          3h35m
+clusterpulse-b6cd8599f-p4fvh    1/1     Terminating   1          3h35m
+clusterpulse-b6cd8599f-tvt8b    1/1     Terminating   1          3h35m
+```
+
+### How to read this
+
+- The new ReplicaSet created Pods with a new hash, here `66c7758c8f`
+- Those new Pods are healthy because they show `1/1 Running`
+- The old ReplicaSet Pods with the previous hash are being scaled down and terminated
+- This is normal during a rollout
+
+### Important interpretation
+
+If the **new** Pods are healthy, then the rollout is likely successful even if the old Pods are still terminating.
+
+---
+
+## Intentionally breaking a probe
+
+The safest Day 4 failure demo is to break the **readiness probe** first.
+
+Why readiness first?
+
+- It is safer than liveness
+- It shows how Kubernetes removes a Pod from traffic
+- It usually does not restart the container
+- It lets you observe `0/1 Ready`
+
+### Temporary broken readiness probe
+
+Change this:
+
+```yaml
+readinessProbe:
+  httpGet:
+    path: /ready
+    port: 5000
+```
+
+To this:
+
+```yaml
+readinessProbe:
+  httpGet:
+    path: /not-ready
+    port: 5000
+```
+
+Then apply again:
+
+```bash
+kubectl apply -f manifests/deployment.yaml
+kubectl get pods -w
+kubectl describe pod <pod-name>
+kubectl get endpoints clusterpulse-service
+kubectl get events --sort-by=.lastTimestamp | tail -20
+```
+
+### What to expect
+
+- Pod may show `0/1 Ready`
+- Container may still be running
+- Service endpoints may stop including that Pod
+- `kubectl describe pod` may show `Warning` and `Unhealthy`
+- App may remain alive, but Kubernetes stops routing traffic to that Pod
+
+---
+
+## What happens if liveness probe is broken
+
+If you intentionally break liveness instead:
+
+```yaml
+livenessProbe:
+  httpGet:
+    path: /bad-health
+    port: 5000
+```
+
+Then Kubernetes will eventually restart the container after repeated failures.
+
+### What to expect
+
+- `RESTARTS` count increases
+- Pod may still exist, but container restarts inside it
+- `kubectl describe pod` shows liveness probe failures
+- `kubectl logs <pod-name> --previous` becomes very useful
+
+### Why this is more dangerous
+
+Because a badly configured liveness probe can cause healthy applications to restart in a loop.
+That is why readiness is the safer first demo.
+
+---
+
+## How to read outputs during Day 4
+
+### `kubectl get pods`
+
+This is the first view.
+
+What to read:
+
+- `READY`
+- `STATUS`
+- `RESTARTS`
+- Pod age
+
+### Meaning of common values
+
+- `1/1 Running` = container is running and ready
+- `0/1 Running` = container may still be running, but it is not ready
+- `CrashLoopBackOff` = repeated restarts after failure
+- `RESTARTS > 0` = container has been restarted at least once
+
+### `kubectl describe pod <pod-name>`
+
+This is the most important debugging command for probes.
+
+What to look for:
+
+- Events section at the bottom
+- `Warning`
+- `Unhealthy`
+- Probe failure messages
+- Restart or killing messages
+
+Typical clues:
+
+- readiness probe failed
+- liveness probe failed
+- startup probe failed
+- container restarted
+
+### `kubectl logs <pod-name>`
+
+This shows the current container logs.
+
+Use this when:
+
+- The app starts but behaves oddly
+- The endpoint path may be wrong
+- You want to see whether Flask is actually serving requests
+
+### `kubectl logs <pod-name> --previous`
+
+This is critical when restarts happen.
+
+Use it when:
+
+- Liveness or startup caused a restart
+- Current logs do not show the previous failed run
+
+### `kubectl get endpoints clusterpulse-service`
+
+This shows which Pod IPs are currently serving behind the Service.
+
+What to look for:
+
+- If endpoints exist, the Service is targeting backend Pods
+- If readiness fails, a Pod may disappear from endpoints
+- If endpoints are empty, the Service has nothing to send traffic to
+
+### `kubectl get events --sort-by=.lastTimestamp | tail -20`
+
+This shows recent cluster events.
+
+Use it when:
+
+- You want a quick recent history of failures
+- You want to confirm probe failures, restarts, and unhealthy events
+
+---
+
+## Day 4 troubleshooting flow
+
+Use this order whenever something goes wrong:
+
+1. Check Pods
+2. Check rollout status
+3. Check ReplicaSets
+4. Describe a Pod
+5. Check logs
+6. Check previous logs if there were restarts
+7. Check Service endpoints
+8. Check recent events
+
+### Command flow
+
+```bash
+kubectl get pods
+kubectl rollout status deployment/clusterpulse
+kubectl get rs
+kubectl describe pod <pod-name>
+kubectl logs <pod-name>
+kubectl logs <pod-name> --previous
+kubectl get endpoints clusterpulse-service
+kubectl get events --sort-by=.lastTimestamp | tail -20
+```
+
+---
+
+## Common Day 4 problems and mitigation
+
+### Problem 1: Pod shows `0/1 Ready`
+
+**Meaning:**
+Usually readiness probe is failing.
+
+**What to check:**
+
+- Is the readiness path correct?
+- Does the app return success on `/ready`?
+- Does `kubectl describe pod` show readiness failures?
+
+**Mitigation:**
+
+- Fix the readiness path
+- Confirm the port is correct
+- Restore the original endpoint if you intentionally broke it
+
+---
+
+### Problem 2: Restart count increases
+
+**Meaning:**
+Usually liveness or startup probe is failing.
+
+**What to check:**
+
+- `kubectl describe pod <pod-name>`
+- `kubectl logs <pod-name> --previous`
+
+**Mitigation:**
+
+- Fix the liveness or startup path
+- Increase delays if app startup is slow
+- Make sure liveness is not checking something too strict
+
+---
+
+### Problem 3: Service endpoints disappear
+
+**Meaning:**
+Pods may no longer be considered ready.
+
+**What to check:**
+
+- `kubectl get endpoints clusterpulse-service`
+- `kubectl get pods`
+- readiness probe status
+
+**Mitigation:**
+
+- Fix readiness probe first
+- Confirm Pods become ready again
+
+---
+
+### Problem 4: Rollout hangs or old Pods stay around
+
+**Meaning:**
+The new Pods may not be becoming healthy enough for rollout to complete.
+
+**What to check:**
+
+- `kubectl rollout status deployment/clusterpulse`
+- `kubectl get rs`
+- `kubectl describe pod <new-pod>`
+
+**Mitigation:**
+
+- Fix probe configuration
+- Re-apply corrected YAML
+- Wait for healthy new Pods before old ones fully terminate
+
+---
+
+### Problem 5: Confusing cluster noise
+
+On Day 4 there were also unrelated `nginx` Pods showing `ImagePullBackOff`.
+Those were older, unrelated failures in the cluster.
+
+**Important lesson:**
+Do not let unrelated Pod failures distract you.
+Focus on your app first with:
+
+```bash
+kubectl get pods -l app=clusterpulse
+```
+
+This filters the view to only ClusterPulse Pods.
+
+---
+
+## Best Day 4 mental model
+
+Keep this in mind:
+
+- Startup probe = “Has the app finished booting yet?”
+- Readiness probe = “Can this Pod receive traffic right now?”
+- Liveness probe = “Should this container keep running, or should Kubernetes restart it?”
+
+And the operational meaning:
+
+- Startup failure delays the other probes
+- Readiness failure removes the Pod from Service traffic
+- Liveness failure restarts the container
+
+---
+
+## Best Day 4 memory lines
+
+Use these to revise later:
+
+- Readiness affects traffic.
+- Liveness affects restarts.
+- Startup protects slow boot.
+- `kubectl describe pod` is the most important Day 4 debugging command.
+- `kubectl logs --previous` matters when containers restart.
+- Empty endpoints often mean readiness issues.
+- `0/1 Ready` usually means readiness failure, not necessarily a crash.
+
+---
+
+## Day 4 revision checklist
+
+Use this later for review:
+
+- Do I know the difference between readiness, liveness, and startup probes?
+- Do I know which endpoint each probe should use in ClusterPulse?
+- Do I know why readiness is safer to break first?
+- Do I know how to read `READY`, `STATUS`, and `RESTARTS`?
+- Do I know why old Pods may show `Terminating` during rollout?
+- Do I know why `kubectl describe pod` matters?
+- Do I know when to use `kubectl logs --previous`?
+- Do I know why endpoints may disappear if readiness fails?
+- Do I know the standard Day 4 troubleshooting flow?
+
+If yes, Day 4 concepts are in good shape.
+'''
