@@ -1,20 +1,23 @@
-apiVersion: apps/v1        # Which API version?
-kind: Deployment           # What object am I creating?
-
+apiVersion: apps/v1
+kind: Deployment
 metadata:
-  name: clusterpulse       # What is this object called?
+  name: clusterpulse
   labels:
-    app: clusterpulse      # Label on the Deployment object
-
+    app: clusterpulse
+    env: dev
+    component: web
 spec:
-  replicas: 3              # How many Pod replicas do I want?
+  replicas: 3
   selector:
     matchLabels:
-      app: clusterpulse    # Which Pods belong to this Deployment?
+      app: clusterpulse
+      component: web
   template:
     metadata:
       labels:
-        app: clusterpulse  # Labels that new Pods will get
+        app: clusterpulse
+        env: dev
+        component: web
     spec:
       containers:
       - name: clusterpulse

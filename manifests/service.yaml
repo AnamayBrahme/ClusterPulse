@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: clusterpulse-service
+  labels:
+    app: clusterpulse
+    env: dev
+    component: web
+spec:
+  type: ClusterIP
+  selector:
+    app: clusterpulse
+    component: web
+  ports:
+  - protocol: TCP
+    port: 5000
+    targetPort: 5000
